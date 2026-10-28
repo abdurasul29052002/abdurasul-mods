@@ -15,7 +15,7 @@ test('big context asks only above the limit, "Davom etish" lets the prompt throu
   on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
     const [q] = e.questions
     asked.push(q.question)
-    return { result: { questions: e.questions, answers: { [q.question]: 'Davom etish' } } }
+    return { result: { questions: e.questions, answers: { [q.question]: 'Baribir davom etish' } } }
   })
 
   expect((await $.prompt.submit(typed)).text).toBe('fix it')
@@ -42,7 +42,7 @@ test('the limit comes from the contextLimitK option', { options: { contextLimitK
   let asked = ''
   on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
     asked = e.questions[0].question
-    return { result: { questions: e.questions, answers: { [asked]: 'Davom etish' } } }
+    return { result: { questions: e.questions, answers: { [asked]: 'Baribir davom etish' } } }
   })
 
   await $.prompt.submit(typed)
@@ -137,4 +137,45 @@ test('cold cache asks, and "Baribir davom etish" lets the prompt through', async
   await clock.advance(61 * MIN)
   expect((await $.prompt.submit(typed)).text).toBe('fix it')
   expect(asked).toContain('Kesh o\'lgan (61 daqiqa)')
+})
+
+const stepOf = (model: string, effort: string, agentId?: string) =>
+  ({ turnId: 't1', index: 0, model, effort, messageCount: 1, agentId }) as never
+
+test('old model or costly effort asks before the request; "Tushunarli" sends nothing, "Baribir davom etish" sends', async ($, on) => {
+  const step = async (model: string, effort: string, agentId?: string) => {
+    const stream = $.turn.step(stepOf(model, effort, agentId))
+    // The kit hands the result over as the done step; `.result` stays empty.
+    let r = await stream.next()
+    while (!r.done) r = await stream.next()
+    return r.value
+  }
+  let answer = 'Tushunarli'
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const [q] = e.questions
+    asked.push(q.question)
+    return { result: { questions: e.questions, answers: { [q.question]: answer } } }
+  })
+  let sent = 0
+  on('turn.step', async function* (_$, e) {
+    sent++
+    return { turnId: e.turnId, index: e.index, answer: 'ok', toolUses: [], stopReason: 'end_turn', usage: null }
+  })
+
+  expect((await step('claude-opus-5-5', 'medium')).answer).toBe('ok')
+  expect(asked).toEqual([])
+  expect((await step('claude-opus-5', 'max', 'sub1')).answer).toBe('ok')
+  expect(asked).toEqual([])
+
+  expect((await step('claude-opus-5', 'max')).answer).toBe('')
+  expect(asked[0]).toContain('Taklif etilgan model: Opus 5.5')
+  expect(asked[0]).toContain('Taklif etilgan effort: medium')
+  expect(sent).toBe(2)
+
+  answer = 'Baribir davom etish'
+  expect((await step('claude-opus-5', 'max')).answer).toBe('ok')
+  // Asked once per session: now it passes without a question.
+  await step('claude-opus-5', 'max')
+  expect(asked.length).toBe(2)
 })

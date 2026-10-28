@@ -11,10 +11,20 @@ const count = atom({ plugin: 'token-saver', key: 'promptCount' } as const, 0)
 const CLEAR = 'Tozalash (/clear)'
 const COMPACT = 'Siqish (/compact)'
 const GO = 'Baribir davom etish'
-const GO_ON = 'Davom etish'
 
 // Context size the person chose to go on at; asked again only after it grows by SNOOZE.
 let snoozeAbove = 0
+let modelOk = false
+
+const UNDERSTOOD = 'Tushunarli'
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+// Suggested model and effort per family; the effort is the most the family needs by default.
+const SUGGEST = [
+  { family: 'opus', id: 'claude-opus-5-5', name: 'Opus 5.5', effort: 'medium' },
+  { family: 'sonnet', id: 'claude-sonnet-5-5', name: 'Sonnet 5.5', effort: 'high' },
+  { family: 'fable', id: 'claude-fable-5-1', name: 'Fable 5.1', effort: 'medium' },
+  { family: 'haiku', id: 'claude-haiku-5-5', name: 'Haiku 5.5', effort: 'high' }
+]
 
 // Sent with every request: keep it short.
 const RULES = `# token-saver: ish qoidalari
@@ -98,9 +108,9 @@ const guard = async ($: EngineInterface, e: PromptSubmitInput, limit: number): P
     const choice = await $.ui
       .ask(`Kontekst ${Math.round(tokens / 1000)}K token (chegara ${Math.round(limit / 1000)}K). Davom etish ko'proq token sarflaydi. Siqamizmi yoki yangi sessiya boshlaysizmi?`, {
         header: 'Kontekst',
-        options: [COMPACT, GO_ON]
+        options: [COMPACT, GO]
       })
-      .catch(() => GO_ON)
+      .catch(() => GO)
     if (choice === COMPACT) {
       // The prompt's own words tell the summary what to keep.
       const compacted = await $.session.compact({ instructions: e.text }).then(r => !('skip' in r), () => false)
@@ -126,6 +136,27 @@ export const register: Register = (on, options) => {
     if (stop) return stop
 
     return next(e)
+  })
+
+  // Model and effort show only on a request, so the once-per-session check runs before the first main request.
+  on('turn.step', async function* ($, e, next) {
+    const want = SUGGEST.find(x => e.model.includes(x.family))
+    if (e.agentId !== undefined || !want || modelOk) return yield* next(e)
+
+    const problems: string[] = []
+    if (!e.model.includes(want.id)) problems.push(`${e.model} eski model. Taklif etilgan model: ${want.name}.`)
+    if (typeof e.effort === 'string' && EFFORTS.indexOf(e.effort) > EFFORTS.indexOf(want.effort)) {
+      problems.push(`${e.effort} effort tokenlarni ko'p sarflaydi. Taklif etilgan effort: ${want.effort}.`)
+    }
+    if (!problems.length) return yield* next(e)
+
+    const choice = await $.ui.ask(problems.join(' '), { header: 'Model', options: [UNDERSTOOD, GO] }).catch(() => UNDERSTOOD)
+    if (choice === GO) {
+      modelOk = true
+      return yield* next(e)
+    }
+    // No request leaves: the person changes the model or effort in the app and sends the prompt again.
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
   })
 
   // Cache age counts from the last request, so a long turn keeps it warm.
