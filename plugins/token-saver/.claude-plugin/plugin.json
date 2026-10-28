@@ -1,7 +1,17 @@
 {
   "name": "token-saver",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Token-saving work rules in Uzbek: task boundaries, commits, context and cache reminders",
-  "author": { "name": "Abdurasul" },
-  "types": "./types/index.d.ts"
+  "author": {
+    "name": "Abdurasul"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "contextLimitK": {
+      "type": "number",
+      "title": "Kontekst chegarasi (K token)",
+      "description": "Kontekst shu hajmdan oshsa, plugin modelga yubormasdan siqish yoki davom etishni so‘raydi.",
+      "default": 250
+    }
+  }
 }

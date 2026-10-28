@@ -6,17 +6,47 @@ const usage = (tokens?: number) => ({ value: { startedAt: 0, context: { window: 
 // The engine's bottom: the prompt enters as it arrived, with the context hooks attached.
 const enter = ($: unknown, e: { text: string; context?: readonly string[] }) => ({ text: e.text, context: e.context })
 
-test('context reminder only above 150K tokens', async ($, on) => {
+test('big context asks only above the limit, "Davom etish" lets the prompt through and snoozes', async ($, on) => {
   mock.clock(on, { now: 0 })
   on('prompt.submit', enter)
-  let tokens: number | undefined = 149_000
+  let tokens: number | undefined = 249_000
   on('session.usage', () => usage(tokens))
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const [q] = e.questions
+    asked.push(q.question)
+    return { result: { questions: e.questions, answers: { [q.question]: 'Davom etish' } } }
+  })
 
-  expect((await $.prompt.submit(typed)).context ?? []).toEqual([])
-  tokens = 151_000
-  expect((await $.prompt.submit(typed)).context).toEqual(['[token-saver: kontekst 151K token, chegara 150K]'])
+  expect((await $.prompt.submit(typed)).text).toBe('fix it')
+  expect(asked).toEqual([])
+  tokens = 251_000
+  expect((await $.prompt.submit(typed)).text).toBe('fix it')
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('Kontekst 251K token (chegara 250K)')
+  // Snoozed: no second question until the context grows another 50K.
+  tokens = 280_000
+  await $.prompt.submit(typed)
+  expect(asked.length).toBe(1)
+  tokens = 305_000
+  await $.prompt.submit(typed)
+  expect(asked.length).toBe(2)
   tokens = undefined
-  expect((await $.prompt.submit(typed)).context ?? []).toEqual([])
+  expect((await $.prompt.submit(typed)).text).toBe('fix it')
+})
+
+test('the limit comes from the contextLimitK option', { options: { contextLimitK: 100 } }, async ($, on) => {
+  mock.clock(on, { now: 0 })
+  on('prompt.submit', enter)
+  on('session.usage', () => usage(120_000))
+  let asked = ''
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    asked = e.questions[0].question
+    return { result: { questions: e.questions, answers: { [asked]: 'Davom etish' } } }
+  })
+
+  await $.prompt.submit(typed)
+  expect(asked).toContain('chegara 100K')
 })
 
 test('a failing usage read does not stop the prompt', async ($, on) => {

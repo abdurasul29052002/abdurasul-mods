@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PromptSubmitInput, Register } from 'claude-code'
 
-const LIMIT = 150_000
+const SNOOZE = 50_000
 const COLD_MS = 60 * 60_000
 const MIN_PROMPTS = 3
 
@@ -11,6 +11,10 @@ const count = atom({ plugin: 'token-saver', key: 'promptCount' } as const, 0)
 const CLEAR = 'Tozalash (/clear)'
 const COMPACT = 'Siqish (/compact)'
 const GO = 'Baribir davom etish'
+const GO_ON = 'Davom etish'
+
+// Context size the person chose to go on at; asked again only after it grows by SNOOZE.
+let snoozeAbove = 0
 
 // Sent with every request: keep it short.
 const RULES = `# token-saver: ish qoidalari
@@ -45,11 +49,11 @@ Foydalanuvchi vazifalarni bir-biriga ulab ketishi mumkin; chegarani kuzatish sen
 - "Co-Authored-By" qatorini va "Generated with Claude Code" kabi belgini qo'shma.
 
 ## Kontekst va kesh
-- Chegara foiz emas, aniq hajm: 150K token. Har vosita chaqiruvi butun kontekstni qayta o'qiydi, katta kontekst har chaqiruvni qimmatlashtiradi.
+- Chegara foiz emas, aniq hajm (plugin sozlamasida, standart 250K token). Har vosita chaqiruvi butun kontekstni qayta o'qiydi, katta kontekst har chaqiruvni qimmatlashtiradi.
 - Ko'p fayl o'qish yoki keng qidiruvni yordamchi agentga ber va faqat xulosasini ol.
-- Xabar bilan "[token-saver: kontekst ...]" eslatmasi kelsa (oddiy rejim) va xabar joriy ishga bog'liq bo'lsa: ishni boshlama, bir qatorda yoz: "/compact <keyingi vazifa mavzusi> qilib, keyin davom etamiz."
+- Kontekst chegaradan oshganda plugin modelga yubormasdan o'zi so'raydi (siqish yoki davom etish); sen bu haqda hech narsa qilma.
 - Kesh o'lganda plugin modelga yubormasdan o'zi so'raydi (tozalash, siqish yoki davom etish); sen bu haqda hech narsa qilma.
-- Reja rejimida kontekst eslatmasiga e'tibor berma. Foydalanuvchi "davom et" desa, eslatmani unut va ishla.
+- Foydalanuvchi "davom et" desa, ishla.
 
 ## Xavfsizlik
 Kodda ochiq yozilgan token, parol yoki kalit ko'rsang, qaysi vazifada bo'lishidan qat'i nazar, javobning birinchi qatorida ayt.
@@ -57,7 +61,7 @@ Kodda ochiq yozilgan token, parol yoki kalit ko'rsang, qaysi vazifada bo'lishida
 ## Boshqa plugin'lar bilan
 Reja rejimida savol beruvchi yoki tasdiq kutuvchi skill'larni (masalan superpowers brainstorming) ishlatma: reja allaqachon tasdiqlangan.`
 
-const reminders = async ($: EngineInterface, e: PromptSubmitInput): Promise<string[] | { drop: string }> => {
+const guard = async ($: EngineInterface, e: PromptSubmitInput, limit: number): Promise<{ drop: string } | void> => {
   const now = await $.clock.now()
   const at = await read($, lastAt)
   const n = await read($, count)
@@ -66,7 +70,7 @@ const reminders = async ($: EngineInterface, e: PromptSubmitInput): Promise<stri
   const isTyped = !e.command && !e.isMeta && (e.origin.kind === 'composer' || e.origin.kind === 'channel')
   if (!isTyped) {
     await update($, lastAt, () => now)
-    return []
+    return
   }
 
   // A cold cache makes the model re-read the whole context: ask before any request is sent (the dialog costs no tokens).
@@ -88,16 +92,28 @@ const reminders = async ($: EngineInterface, e: PromptSubmitInput): Promise<stri
   await update($, lastAt, () => now)
   await update($, count, c => c + 1)
 
-  const extra: string[] = []
+  // A big context makes every request dearer: ask before the request (the usage read and the dialog cost no tokens).
   const tokens = await $.session.usage().then(u => u.context.tokens, () => undefined)
-  if (tokens !== undefined && tokens > LIMIT) {
-    extra.push(`[token-saver: kontekst ${Math.round(tokens / 1000)}K token, chegara ${LIMIT / 1000}K]`)
+  if (tokens !== undefined && tokens > limit && tokens > snoozeAbove) {
+    const choice = await $.ui
+      .ask(`Kontekst ${Math.round(tokens / 1000)}K token (chegara ${Math.round(limit / 1000)}K). Davom etish ko'proq token sarflaydi. Siqamizmi yoki yangi sessiya boshlaysizmi?`, {
+        header: 'Kontekst',
+        options: [COMPACT, GO_ON]
+      })
+      .catch(() => GO_ON)
+    if (choice === COMPACT) {
+      // The prompt's own words tell the summary what to keep.
+      const compacted = await $.session.compact({ instructions: e.text }).then(r => !('skip' in r), () => false)
+      if (!compacted) return { drop: `Siqib bo'lmadi. /compact <mavzu> deb o'zingiz yozing.` }
+    } else {
+      snoozeAbove = tokens + SNOOZE
+    }
   }
-
-  return extra
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const limit = Number(options.contextLimitK) * 1000
+
   on('prompt.compose', async ($, e, next) => {
     const { sections } = await next(e)
 
@@ -105,11 +121,11 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    // A failing reminder only costs the reminder, never the prompt.
-    const extra = await reminders($, e).catch(() => [])
-    if ('drop' in extra) return extra
+    // A failing guard only costs the question, never the prompt.
+    const stop = await guard($, e, limit).catch(() => undefined)
+    if (stop) return stop
 
-    return next(extra.length ? { ...e, context: [...(e.context ?? []), ...extra] } : e)
+    return next(e)
   })
 
   // Cache age counts from the last request, so a long turn keeps it warm.

@@ -15,6 +15,6 @@ test('the rules are added as the last session section', async ($, on) => {
   expect(sections.map(s => s.id)).toEqual(['intro', 'token-saver:rules'])
   const rules = sections[1]
   expect(rules.scope).toBe('session')
-  expect(rules.text).toContain('150K')
+  expect(rules.text).toContain('250K')
   expect(rules.text.split('\n').length).toBeLessThan(60)
 })
