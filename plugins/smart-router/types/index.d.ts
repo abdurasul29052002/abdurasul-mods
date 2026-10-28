@@ -15,6 +15,10 @@ export type TaskRun = {
   main: Tok
   /** The small classifier calls the mod makes for subagents that came without a model. */
   router: Tok
+  /** Tokens of the session's earlier finished prompts, main, router and subagents together. */
+  prior: Tok
+  /** Working time of the session's earlier finished prompts, in ms. */
+  priorMs: number
 }
 
 export type Todo = { id: string; title: string; status: 'pending' | 'in_progress' | 'completed' }

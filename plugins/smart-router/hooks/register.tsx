@@ -250,6 +250,10 @@ const saveHistory = async ($: any) => {
   await $.store.set(historyKey, [...historyByAnswer].slice(-300))
 }
 
+// The session's finished prompts in $.store, so a reload of the mod keeps the totals.
+const totalKey = (id: string) => 'total:' + id
+const loadTotal = async ($: any) => (await $.store.get(totalKey(await $.session.id()))) as { tok: Tok; ms: number } | undefined
+
 const maybeEndRun = async ($: any, isMainBusy: boolean, isInMainTurn = false): Promise<string | null> => {
   if (isMainBusy) {
     historyStatus = 'kutilmoqda: asosiy chat hali band'
@@ -268,7 +272,12 @@ const maybeEndRun = async ($: any, isMainBusy: boolean, isInMainTurn = false): P
   if (r.endedAt !== null) return null
   const ended = { ...r, endedAt: await $.clock.now() }
   await update($, run, () => ended)
-  const text = historyLine(ended, await read($, todos), subs, await read($, agentUse))
+  const use = await read($, agentUse)
+  await $.store.set(totalKey(await $.session.id()), {
+    tok: plus(ended.prior, plus(plus(ended.main, ended.router), agentTotal(use))),
+    ms: ended.priorMs + elapsedOf(ended, ended.endedAt as number),
+  })
+  const text = historyLine(ended, await read($, todos), subs, use)
   if (isInMainTurn) {
     historyStatus = 'javob ichiga chizildi'
     return text
@@ -333,7 +342,11 @@ export const register: Register = on => {
     const r = await read($, run)
     if (!e.isMeta && !e.command && (r === null || r.endedAt !== null)) {
       const t = await $.clock.now()
-      await update($, run, () => ({ startedAt: t, endedAt: null, main: ZERO, router: ZERO }))
+      // The finished prompt folds into the session totals instead of starting from zero.
+      const saved = r === null ? await loadTotal($) : null
+      const prior = r === null ? saved?.tok ?? ZERO : plus(r.prior, plus(plus(r.main, r.router), agentTotal(await read($, agentUse))))
+      const priorMs = r === null ? saved?.ms ?? 0 : r.priorMs + elapsedOf(r, r.endedAt ?? t)
+      await update($, run, () => ({ startedAt: t, endedAt: null, main: ZERO, router: ZERO, prior, priorMs }))
       await update($, now, () => t)
       await update($, todos, () => [])
       await update($, agents, () => [])
@@ -473,13 +486,13 @@ export const register: Register = on => {
     const use = await read($, agentUse)
     const { Box, Text } = $.ui.resolve(e)
     const pct = progressOf(list, subs)
-    const total = plus(plus(cur.main, cur.router), agentTotal(use))
+    const total = plus(cur.prior, plus(plus(cur.main, cur.router), agentTotal(use)))
     const running = subs.filter(a => !a.isDone)
 
     return (
       <Box flexDirection="column">
         <Text>
-          <Text bold>⏱ {fmtTime(elapsedOf(cur, tick))}</Text>
+          <Text bold>⏱ {fmtTime(cur.priorMs + elapsedOf(cur, tick))}</Text>
           {pct !== null && <Text>{`  ·  ${bar(pct, 10)} ${pct}%`}</Text>}
           <Text>{`  ·  ${io(total)}`}</Text>
           {total.cacheRead > 0 && <Text dimColor>{`  ⚡ ${num(total.cacheRead)} kesh`}</Text>}
@@ -628,7 +641,7 @@ export const register: Register = on => {
     const done = list.filter(t => t.status === 'completed').length
     const status = cur.endedAt === null ? 'Ishlayapti' : 'Tugadi'
     const agentsTok = agentTotal(use)
-    const total = plus(plus(cur.main, cur.router), agentsTok)
+    const total = plus(cur.prior, plus(plus(cur.main, cur.router), agentsTok))
 
     return (
       <Box flexDirection="column">
@@ -642,9 +655,9 @@ export const register: Register = on => {
           </Text>
         )}
         <Text> </Text>
-        <Text>⏱ Vaqt: {fmtTime(elapsedOf(cur, tick))}</Text>
+        <Text>⏱ Vaqt (sessiya): {fmtTime(cur.priorMs + elapsedOf(cur, tick))}</Text>
         <Text> </Text>
-        <Text bold>Tokenlar (jami)</Text>
+        <Text bold>Tokenlar (sessiya jami)</Text>
         <Text>↓ kirish: {num(total.input + total.cacheWrite)}</Text>
         <Text>↑ chiqish: {num(total.output)}</Text>
         <Text dimColor>⚡ kesh o‘qildi: {num(total.cacheRead)}</Text>

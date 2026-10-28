@@ -8,6 +8,8 @@ const PANE = {
 
 test('the task list drives the dashboard progress on every surface', async ($, on) => {
   mock.clock(on, { now: 1000 })
+  on('session.id', () => ({ value: 's1' }))
+  mock.store(on)
   // Beneath the plugin: stand in for the engine's prompt entry and task tools.
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('tool.call', { tool: 'TaskCreate' }, (_$, e) => ({ result: { task: { id: e.subject, subject: e.subject } } }))
