@@ -2,6 +2,6 @@
   "name": "token-saver",
   "version": "0.1.0",
   "description": "Token-saving work rules in Uzbek: task boundaries, commits, context and cache reminders",
-  "author": { "name": "abdurasul" },
+  "author": { "name": "Abdurasul" },
   "types": "./types/index.d.ts"
 }
