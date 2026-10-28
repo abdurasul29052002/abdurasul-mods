@@ -8,6 +8,10 @@ const MIN_PROMPTS = 3
 const lastAt = atom({ plugin: 'token-saver', key: 'lastPromptAt' } as const, null)
 const count = atom({ plugin: 'token-saver', key: 'promptCount' } as const, 0)
 
+const CLEAR = 'Tozalash (/clear)'
+const COMPACT = 'Siqish (/compact)'
+const GO = 'Baribir davom etish'
+
 // Sent with every request: keep it short.
 const RULES = `# token-saver: ish qoidalari
 Bu qoidalar foydalanuvchi o'rnatgan token-saver plugin'idan. Foydalanuvchining o'z CLAUDE.md si bilan ziddiyat bo'lsa, CLAUDE.md ustun.
@@ -44,8 +48,8 @@ Foydalanuvchi vazifalarni bir-biriga ulab ketishi mumkin; chegarani kuzatish sen
 - Chegara foiz emas, aniq hajm: 150K token. Har vosita chaqiruvi butun kontekstni qayta o'qiydi, katta kontekst har chaqiruvni qimmatlashtiradi.
 - Ko'p fayl o'qish yoki keng qidiruvni yordamchi agentga ber va faqat xulosasini ol.
 - Xabar bilan "[token-saver: kontekst ...]" eslatmasi kelsa (oddiy rejim) va xabar joriy ishga bog'liq bo'lsa: ishni boshlama, bir qatorda yoz: "/compact <keyingi vazifa mavzusi> qilib, keyin davom etamiz."
-- Xabar bilan "[token-saver: kesh ...]" eslatmasi kelsa (oddiy rejim): kod o'qimasdan bir qatorda yoz: "Kesh o'lgan (N daqiqa). Yangi vazifa bo'lsa /clear, shu vazifani davom ettirsak /compact <mavzu> qiling." va javobni kut.
-- Reja rejimida ikkala eslatmaga ham e'tibor berma. Foydalanuvchi "davom et" desa, eslatmani unut va ishla.
+- Kesh o'lganda plugin modelga yubormasdan o'zi so'raydi (tozalash, siqish yoki davom etish); sen bu haqda hech narsa qilma.
+- Reja rejimida kontekst eslatmasiga e'tibor berma. Foydalanuvchi "davom et" desa, eslatmani unut va ishla.
 
 ## Xavfsizlik
 Kodda ochiq yozilgan token, parol yoki kalit ko'rsang, qaysi vazifada bo'lishidan qat'i nazar, javobning birinchi qatorida ayt.
@@ -53,24 +57,41 @@ Kodda ochiq yozilgan token, parol yoki kalit ko'rsang, qaysi vazifada bo'lishida
 ## Boshqa plugin'lar bilan
 Reja rejimida savol beruvchi yoki tasdiq kutuvchi skill'larni (masalan superpowers brainstorming) ishlatma: reja allaqachon tasdiqlangan.`
 
-const reminders = async ($: EngineInterface, e: PromptSubmitInput): Promise<string[]> => {
+const reminders = async ($: EngineInterface, e: PromptSubmitInput): Promise<string[] | { drop: string }> => {
   const now = await $.clock.now()
   const at = await read($, lastAt)
   const n = await read($, count)
-  await update($, lastAt, () => now)
 
   // Only the person's own typed prompts get reminders and count.
   const isTyped = !e.command && !e.isMeta && (e.origin.kind === 'composer' || e.origin.kind === 'channel')
-  if (!isTyped) return []
+  if (!isTyped) {
+    await update($, lastAt, () => now)
+    return []
+  }
+
+  // A cold cache makes the model re-read the whole context: ask before any request is sent (the dialog costs no tokens).
+  if (at !== null && n >= MIN_PROMPTS && now - at > COLD_MS) {
+    const minutes = Math.floor((now - at) / 60_000)
+    const choice = await $.ui
+      .ask(`Kesh o'lgan (${minutes} daqiqa). Keyingi xabar butun kontekstni qayta o'qiydi va token sarflaydi. Nima qilamiz?`, {
+        header: 'Kesh',
+        options: [CLEAR, COMPACT, GO]
+      })
+      .catch(() => CLEAR)
+    if (choice === COMPACT) {
+      const compacted = await $.session.compact().then(() => true, () => false)
+      if (!compacted) return { drop: `Siqib bo'lmadi. /compact <mavzu> deb o'zingiz yozing.` }
+    } else if (choice !== GO) {
+      return { drop: `Model chaqirilmadi, token ketmadi. /clear yozing va vazifani qayta yozing.` }
+    }
+  }
+  await update($, lastAt, () => now)
   await update($, count, c => c + 1)
 
   const extra: string[] = []
   const tokens = await $.session.usage().then(u => u.context.tokens, () => undefined)
   if (tokens !== undefined && tokens > LIMIT) {
     extra.push(`[token-saver: kontekst ${Math.round(tokens / 1000)}K token, chegara ${LIMIT / 1000}K]`)
-  }
-  if (at !== null && n >= MIN_PROMPTS && now - at > COLD_MS) {
-    extra.push(`[token-saver: kesh ${Math.floor((now - at) / 60_000)} daqiqa]`)
   }
 
   return extra
@@ -86,6 +107,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     // A failing reminder only costs the reminder, never the prompt.
     const extra = await reminders($, e).catch(() => [])
+    if ('drop' in extra) return extra
 
     return next(extra.length ? { ...e, context: [...(e.context ?? []), ...extra] } : e)
   })

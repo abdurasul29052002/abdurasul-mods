@@ -45,7 +45,8 @@ test('cache reminder needs 3 earlier prompts and more than 60 minutes', async ($
   await clock.advance(59 * MIN)
   expect(await ask()).toEqual([])
   await clock.advance(61 * MIN)
-  expect(await ask()).toEqual(['[token-saver: kesh 61 daqiqa]'])
+  // Cold cache: the prompt is refused once, before the model is called; the resend goes through.
+  expect((await $.prompt.submit(typed)).drop).toContain('Model chaqirilmadi')
 })
 
 test('a finished turn keeps the cache warm', async ($, on) => {
@@ -84,9 +85,26 @@ test('commands and plugin prompts neither count nor remind, /clear starts over',
   await ask()
   await ask()
   await clock.advance(61 * MIN)
-  expect(await ask()).toEqual(['[token-saver: kesh 61 daqiqa]'])
+  expect((await $.prompt.submit(typed)).drop).toContain('Model chaqirilmadi')
 
   await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
   await clock.advance(61 * MIN)
   expect(await ask()).toEqual([])
+})
+
+test('cold cache asks, and "Baribir davom etish" lets the prompt through', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  on('prompt.submit', enter)
+  on('session.usage', () => usage(1000))
+  let asked = ''
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e) => {
+    const [q] = e.questions
+    asked = q.question
+    return { result: { questions: e.questions, answers: { [q.question]: 'Baribir davom etish' } } }
+  })
+  for (let i = 0; i < 3; i++) await $.prompt.submit(typed)
+
+  await clock.advance(61 * MIN)
+  expect((await $.prompt.submit(typed)).text).toBe('fix it')
+  expect(asked).toContain('Kesh o\'lgan (61 daqiqa)')
 })
