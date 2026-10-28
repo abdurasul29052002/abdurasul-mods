@@ -1,0 +1,9 @@
+{
+  "name": "abdurasul-mods",
+  "owner": { "name": "abdurasul" },
+  "description": "Claude Code mods: model routing and token-saving work rules",
+  "plugins": [
+    { "name": "smart-router", "source": "./plugins/smart-router" },
+    { "name": "token-saver", "source": "./plugins/token-saver" }
+  ]
+}
