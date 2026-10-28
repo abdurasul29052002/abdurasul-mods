@@ -1,6 +1,6 @@
 {
   "name": "smart-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Routes each turn and each subagent to a model and effort by difficulty, with a task progress dashboard",
   "author": { "name": "Abdurasul" },
   "types": "./types/index.d.ts"
