@@ -42,4 +42,8 @@ export type RouterState = {
   agentUse: Record<string, Tok & { model: string }>
   now: number
   isPaneOpened: boolean
+  /** The session's cost as the engine totals it; null until it reports one. */
+  usd: number | null
+  /** The cost of each of the last main turns, oldest first. */
+  turnCosts: number[]
 }

@@ -1,6 +1,8 @@
 import type { Register } from 'claude-code'
 
 import type { Effort, Route, RouterState, SubAgent, TaskRun, Tier, Tok, Todo } from '../types'
+import { bandSvg, boardHtml, chartSvg, dailyStack, dayOf, fmtTime, num, plus, shiftDay, sumOf, usd, weekStartOf, ZERO } from './board'
+import type { Board, Col, UseRow } from './board'
 
 const isEnabled = 'isEnabled' as const
 const run = 'run' as const
@@ -43,18 +45,11 @@ const POLICY = `The smart-router plugin is active (the user installed it and ask
 
 type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
 
-const ZERO: Tok = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 const toTok = (u: Usage): Tok => ({
   input: u.input_tokens,
   output: u.output_tokens,
   cacheRead: u.cache_read_input_tokens,
   cacheWrite: u.cache_creation_input_tokens,
-})
-const plus = (a: Tok, b: Tok): Tok => ({
-  input: a.input + b.input,
-  output: a.output + b.output,
-  cacheRead: a.cacheRead + b.cacheRead,
-  cacheWrite: a.cacheWrite + b.cacheWrite,
 })
 
 const parseRoute = (text: string): Route | null => {
@@ -72,7 +67,7 @@ const parseRoute = (text: string): Route | null => {
 // State lives in this module and every change redraws the band and the pane.
 // ponytail: $.state is not available on this build yet, so a hot reload of the mod resets the dashboard
 type S = RouterState
-let state: S = { isEnabled: true, run: null, todos: [], agents: [], agentUse: {}, now: 0, isPaneOpened: false }
+let state: S = { isEnabled: true, run: null, todos: [], agents: [], agentUse: {}, now: 0, isPaneOpened: false, usd: null, turnCosts: [] }
 const read = async <K extends keyof S>($: any, key: K): Promise<S[K]> => state[key]
 const update = async <K extends keyof S>($: any, key: K, fn: (v: S[K]) => S[K]) => {
   state = { ...state, [key]: fn(state[key]) }
@@ -80,20 +75,6 @@ const update = async <K extends keyof S>($: any, key: K, fn: (v: S[K]) => S[K]) 
 }
 
 // Drawing helpers.
-// 950, 1.3K, 525.1K, 1.9M, 2.4B: one decimal, a trailing .0 dropped.
-const num = (n: number) => {
-  for (const [v, u] of [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']] as const) {
-    if (n >= v) return (n / v).toFixed(1).replace(/\.0$/, '') + u
-  }
-  return String(n)
-}
-const fmtTime = (ms: number) => {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  const h = Math.floor(s / 3600)
-  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0')
-  const ss = String(s % 60).padStart(2, '0')
-  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
-}
 const bar = (pct: number, width: number) => {
   const filled = Math.round((pct / 100) * width)
   return '█'.repeat(filled) + '░'.repeat(width - filled)
@@ -126,68 +107,109 @@ const addAgent = async ($: any, agentId: string, usage: Usage & { model: string 
 
 // Daily usage across sessions: one $.store key per day, session and folder, so parallel sessions never write the same key.
 // ponytail: keys are never pruned; the 4 MiB store holds years of these, prune when it nears that
+// Also per model tier (mdl|day|session|tier) and the cost per folder (usd|day|session|cwd), for board.html.
 const USE = 'use|'
-const dayOf = (ms: number) => new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 10)
-const sumOf = (t: Tok) => t.input + t.cacheWrite + t.output
-const folderName = (cwd: string) => cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd
+const MDL = 'mdl|'
+const USD = 'usd|'
+const tierOf = (model: string) => TIERS.find(t => model.includes(t)) ?? 'other'
 // The session's own keys, so two requests at once (parallel subagents) add up instead of overwriting each other.
-const useCache = new Map<string, Tok>()
-
-const recordUse = async ($: any, usage: Usage) => {
-  const key = `${USE}${dayOf(await $.clock.now())}|${await $.session.id()}|${await $.session.cwd()}`
+const useCache = new Map<string, unknown>()
+const addStored = async <T,>($: any, key: string, zero: T, add: (a: T) => T) => {
   if (!useCache.has(key)) {
-    const saved = (await $.store.get(key)) as Tok | undefined
-    if (!useCache.has(key)) useCache.set(key, saved ?? ZERO)
+    const saved = (await $.store.get(key)) as T | undefined
+    if (!useCache.has(key)) useCache.set(key, saved ?? zero)
   }
-  const tok = plus(useCache.get(key) as Tok, toTok(usage))
-  useCache.set(key, tok)
-  await $.store.set(key, tok)
+  const v = add(useCache.get(key) as T)
+  useCache.set(key, v)
+  await $.store.set(key, v)
+}
+
+const recordUse = async ($: any, usage: Usage, model: string) => {
+  const head = `${dayOf(await $.clock.now())}|${await $.session.id()}|`
+  await addStored($, `${USE}${head}${await $.session.cwd()}`, ZERO, t => plus(t, toTok(usage)))
+  await addStored($, `${MDL}${head}${tierOf(model)}`, ZERO, t => plus(t, toTok(usage)))
   $.ui.invalidate('ui.render')
 }
 
-type UseRow = { day: string; cwd: string; tok: Tok }
-const loadUse = async ($: any): Promise<UseRow[]> => {
-  const rows: UseRow[] = []
+// The cost of the main turn that just ended: the engine's session total minus the one seen before.
+let usdSeen = 0
+const recordCost = async ($: any) => {
+  const total = (await $.session.usage().catch(() => undefined))?.cost?.usd as number | undefined
+  if (total === undefined) return
+  // A total below the last one means the engine started its count over (a /clear).
+  const turn = total >= usdSeen ? total - usdSeen : total
+  usdSeen = total
+  await update($, 'usd', () => total)
+  await update($, 'turnCosts', (list: number[]) => [...list, turn].slice(-20))
+  const key = `${USD}${dayOf(await $.clock.now())}|${await $.session.id()}|${await $.session.cwd()}`
+  await addStored($, key, 0, (v: number) => v + turn)
+}
+
+// Rows of one prefix: [day, the key's middle part, the key's last part (a cwd may hold '|'), value].
+const loadRows = async ($: any, prefix: string) => {
+  const rows: { day: string; rest: string; value: unknown }[] = []
   for (const key of await $.store.keys()) {
-    if (!key.startsWith(USE)) continue
-    const [, day, , ...cwd] = key.split('|')
-    rows.push({ day, cwd: envOf(cwd.join('|')), tok: (await $.store.get(key)) as Tok })
+    if (!key.startsWith(prefix)) continue
+    const [, day, , ...rest] = key.split('|')
+    rows.push({ day, rest: rest.join('|'), value: await $.store.get(key) })
   }
   return rows
 }
-const totalsBy = (rows: UseRow[], keyOf: (r: UseRow) => string) => {
-  const m = new Map<string, Tok>()
-  for (const r of rows) m.set(keyOf(r), plus(m.get(keyOf(r)) ?? ZERO, r.tok))
-  return [...m]
+const loadUse = async ($: any): Promise<UseRow[]> =>
+  (await loadRows($, USE)).map(r => ({ day: r.day, cwd: envOf(r.rest), tok: r.value as Tok }))
+
+const loadBoard = async ($: any): Promise<Board> => {
+  const sessions: Board['sessions'] = []
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith('total:')) continue
+    const t = (await $.store.get(key)) as { tok: Tok; ms: number; cwd?: string; startedAt?: number; usd?: number }
+    // Totals saved before this version have no folder or start time.
+    if (t.cwd !== undefined && t.startedAt !== undefined) {
+      sessions.push({ cwd: envOf(t.cwd), startedAt: t.startedAt, ms: t.ms, tok: t.tok, usd: t.usd ?? null })
+    }
+  }
+  return {
+    now: await $.clock.now(),
+    use: await loadUse($),
+    costs: (await loadRows($, USD)).map(r => ({ day: r.day, cwd: envOf(r.rest), usd: r.value as number })),
+    models: (await loadRows($, MDL)).map(r => ({ day: r.day, tier: r.rest, tok: r.value as Tok })),
+    sessions,
+  }
+}
+
+// Writes board.html fresh and opens it in the default browser.
+const openBoard = async ($: any) => {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  const file = `${(await $.env.get('XDG_CONFIG_HOME')) ?? `${home}/.config`}/smart-router/board.html`
+  // $.fs.write creates the directory.
+  await $.fs.write(file, boardHtml(await loadBoard($)))
+  const windows = (await $.env.get('OS')) === 'Windows_NT'
+  const mac = !windows && (await $.process.run(['uname'])).stdout.trim() === 'Darwin'
+  await $.process.run(windows ? ['cmd', '/c', 'start', '', file] : [mac ? 'open' : 'xdg-open', file])
+  return file
 }
 
 // Stats pane: a Desktop environment is its workspace folder; a worktree session counts toward the folder it was cut from.
 const envOf = (cwd: string) => cwd.replace(/[\\/]\.claude[\\/]worktrees[\\/].*$/, '')
-const shiftDay = (day: string, n: number) => new Date(Date.parse(day + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10)
-const ENV_COLORS = ['#7F77DD', '#1D9E75', '#D85A30']
-const OTHER_COLOR = '#888780'
 const PERIODS = [7, 14, 30]
 // ponytail: module variable, a hot reload resets the period to 14 days
 let statsDays = 14
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 
-// One stacked bar per day, a part per environment; hovering a bar shows its numbers.
-const chartSvg = (days: string[], perDay: number[][], legend: { name: string; color: string }[]) => {
-  const W = 352
-  const H = 110
-  const w = W / days.length
-  const max = Math.max(1, ...perDay.map(p => p.reduce((a, b) => a + b, 0)))
-  const bars = perDay.map((day, i) => {
-    let y = H
-    const parts = day.map((v, j) => {
-      const h = (v / max) * (H - 4)
-      y -= h
-      return h > 0 ? `<rect x="${i * w + 2}" y="${y}" width="${w - 4}" height="${Math.max(h - 1, 1)}" fill="${legend[j]?.color}"/>` : ''
-    })
-    const tip = [`${days[i]}: ${num(day.reduce((a, b) => a + b, 0))}`, ...day.flatMap((v, j) => (v > 0 ? [`${legend[j]?.name}: ${num(v)}`] : []))]
-    return `<g><title>${esc(tip.join('\n'))}</title>${parts.join('')}<rect x="${i * w}" y="0" width="${w}" height="${H}" fill="transparent"/></g>`
-  })
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${bars.join('')}</svg>`
+// The app's own plan (the list under the latest message): the same progress as TaskCreate or TodoWrite.
+type PlanInput = { items?: { content: string; status: Todo['status'] }[]; advance?: boolean; done?: number[]; start?: number }
+const applyPlan = (list: Todo[], e: PlanInput): Todo[] => {
+  if (e.items) return e.items.map((t, i) => ({ id: `plan-${i}`, title: t.content, status: t.status }))
+  let next = list
+  if (e.advance) {
+    const at = next.findIndex(t => t.status === 'in_progress')
+    next = next.map((t, i) => (i === at ? { ...t, status: 'completed' } : t))
+    const pending = next.findIndex((t, i) => i > at && t.status === 'pending')
+    if (pending >= 0) next = next.map((t, i) => (i === pending ? { ...t, status: 'in_progress' } : t))
+  }
+  // done and start are 1-based.
+  if (e.done) next = next.map((t, i) => (e.done?.includes(i + 1) ? { ...t, status: 'completed' } : t))
+  if (e.start !== undefined) next = next.map((t, i) => (i + 1 === e.start ? { ...t, status: 'in_progress' } : t.status === 'in_progress' ? { ...t, status: 'pending' } : t))
+  return next
 }
 
 // Only for a subagent that came with no type, model or effort: Haiku judges the subtask.
@@ -202,7 +224,7 @@ const classify = async ($: any, text: string): Promise<Route | null> => {
   })
   if (r.usage) {
     await addRouter($, r.usage)
-    await recordUse($, r.usage)
+    await recordUse($, r.usage, HAIKU)
   }
   return r.isAnswered ? parseRoute(r.text) : null
 }
@@ -252,7 +274,8 @@ const saveHistory = async ($: any) => {
 
 // The session's finished prompts in $.store, so a reload of the mod keeps the totals.
 const totalKey = (id: string) => 'total:' + id
-const loadTotal = async ($: any) => (await $.store.get(totalKey(await $.session.id()))) as { tok: Tok; ms: number } | undefined
+const loadTotal = async ($: any) =>
+  (await $.store.get(totalKey(await $.session.id()))) as { tok: Tok; ms: number; startedAt?: number } | undefined
 
 const maybeEndRun = async ($: any, isMainBusy: boolean, isInMainTurn = false): Promise<string | null> => {
   if (isMainBusy) {
@@ -273,9 +296,14 @@ const maybeEndRun = async ($: any, isMainBusy: boolean, isInMainTurn = false): P
   const ended = { ...r, endedAt: await $.clock.now() }
   await update($, run, () => ended)
   const use = await read($, agentUse)
+  const saved = await loadTotal($)
   await $.store.set(totalKey(await $.session.id()), {
     tok: plus(ended.prior, plus(plus(ended.main, ended.router), agentTotal(use))),
     ms: ended.priorMs + elapsedOf(ended, ended.endedAt as number),
+    // For board.html's session list.
+    cwd: await $.session.cwd(),
+    startedAt: saved?.startedAt ?? (await $.session.usage().catch(() => undefined))?.startedAt ?? r.startedAt,
+    usd: (await read($, 'usd')) ?? undefined,
   })
   const text = historyLine(ended, await read($, todos), subs, use)
   if (isInMainTurn) {
@@ -300,6 +328,11 @@ export const register: Register = on => {
     await $.command.register({ name: 'router', description: 'Smart router: on, off, or show its state', argumentHint: 'on | off' })
     await $.command.register({ name: 'dashboard', description: 'Open the task progress dashboard' })
     await $.command.register({ name: 'token-stats', description: 'Open token usage stats by day and folder' })
+    await $.command.register({ name: 'router-board', description: 'Open the usage board (all sessions and folders) in the browser' })
+    // The cost so far is the baseline for the next turn's own cost.
+    const usd = (await $.session.usage().catch(() => undefined))?.cost?.usd as number | undefined
+    usdSeen = usd ?? 0
+    await update($, 'usd', () => usd ?? null)
     // Ticks the elapsed time while a task runs; writes only then, so an idle session redraws nothing.
     $.clock.every(1000, async () => {
       const r = await read($, run)
@@ -329,6 +362,11 @@ export const register: Register = on => {
   on('command.run', { command: 'token-stats' }, async $ => {
     await $.ui.open({ id: STATS, title: 'Token statistikasi' })
     return { text: 'Token statistikasi ochildi.' }
+  })
+
+  on('command.run', { command: 'router-board' }, async $ => {
+    const file = await openBoard($)
+    return { text: `Board ochildi: ${file}` }
   })
 
   // ponytail: sent once per conversation; /router off does not take it back (it only asks for good delegation)
@@ -367,7 +405,7 @@ export const register: Register = on => {
     if (out.usage) {
       if (e.agentId === undefined) await addMain($, out.usage)
       else await addAgent($, e.agentId, out.usage)
-      await recordUse($, out.usage)
+      await recordUse($, out.usage, (out.usage as { model?: string }).model ?? '')
     }
     return out
   })
@@ -380,6 +418,7 @@ export const register: Register = on => {
       return next(e)
     }
     isMainBusy = false
+    await recordCost($)
     const line = await maybeEndRun($, isMainBusy, true)
     if (line && e.answer.trim()) {
       historyByAnswer.set(answerKey(e.answer), line)
@@ -464,6 +503,22 @@ export const register: Register = on => {
     return ran
   })
 
+  on('tool.call', { tool: 'mcp__ccd_turn__update_plan' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!ran.isError && ran.deny === undefined) {
+      await update($, todos, (list: Todo[]) => applyPlan(list, e as PlanInput))
+      await maybeOpenPane($)
+    }
+    return ran
+  })
+
+  // Wrapping up checks off the whole plan.
+  on('tool.call', { tool: 'mcp__ccd_turn__wrap_up' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!ran.isError && ran.deny === undefined) await update($, todos, (list: Todo[]) => list.map(t => ({ ...t, status: 'completed' })))
+    return ran
+  })
+
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     const text = e.props.text.trim()
     if (!text) return next(e)
@@ -484,20 +539,59 @@ export const register: Register = on => {
     const list = await read($, todos)
     const subs = await read($, agents)
     const use = await read($, agentUse)
-    const { Box, Text } = $.ui.resolve(e)
+    const els = $.ui.resolve(e)
+    const { Box, Text, Button } = els
     const pct = progressOf(list, subs)
     const total = plus(cur.prior, plus(plus(cur.main, cur.router), agentTotal(use)))
     const running = subs.filter(a => !a.isDone)
+    const usdNow = await read($, 'usd')
+    const costs = await read($, 'turnCosts')
+    const last = costs[costs.length - 1]
+    const turns = costs.length
+    const elapsed = fmtTime(cur.priorMs + elapsedOf(cur, tick))
+    const context = total.input + total.cacheWrite + total.cacheRead
+    const cachePct = context > 0 ? Math.round((100 * total.cacheRead) / context) : 0
 
-    return (
-      <Box flexDirection="column">
+    const cols: Col[] = [
+      { key: 'cost', label: 'narx', value: usd(usdNow), sub: last === undefined ? '' : `oxirgi ${usd(last)} · ⌀ ${usd(costs.reduce((a, b) => a + b, 0) / turns)}` },
+      { key: 'tokens', label: 'tokenlar', value: num(sumOf(total)), sub: io(total) },
+      { key: 'cache', label: 'kesh', value: num(total.cacheRead), sub: `${cachePct}% keshdan o‘qildi` },
+      { key: 'time', label: 'vaqt', value: elapsed, sub: cur.endedAt === null ? 'ishlayapti' : '✓ tugadi' },
+    ]
+    if (pct !== null) {
+      const done = list.length > 0 ? `${list.filter(t => t.status === 'completed').length}/${list.length} vazifa` : `${subs.filter(a => a.isDone).length}/${subs.length} subagent`
+      cols.push({ key: 'progress', label: 'progress', value: `${pct}%`, sub: done, pct })
+    }
+
+    const buttons = (
+      <Box flexDirection="row" alignItems="center" gap={1}>
         <Text>
-          <Text bold>⏱ {fmtTime(cur.priorMs + elapsedOf(cur, tick))}</Text>
+          <Text color="suggestion">●</Text> <Text bold>smart-router</Text>
+        </Text>
+        <Box flexGrow={1} />
+        <Button key="dashboard" plain label="Dashboard" onPress={() => update($, isPaneOpened, () => true).then(() => $.ui.open({ id: PANE, title: 'Task dashboard' }))} />
+        <Button key="stats" plain label="Statistika" onPress={() => $.ui.open({ id: STATS, title: 'Token statistikasi' })} />
+        <Button key="board" plain label="Board" onPress={() => openBoard($).catch(() => $.ui.toast('smart-router: board ochilmadi'))} />
+      </Box>
+    )
+    const metrics =
+      e.surface !== 'terminal' && 'Svg' in els ? (
+        <els.Svg source={bandSvg(cols, costs)} alt={cols.map(c => `${c.label} ${c.value}`).join(', ')} />
+      ) : (
+        <Text>
+          <Text bold>⏱ {elapsed}</Text>
+          {usdNow !== null && <Text>{`  ·  ${usd(usdNow)}`}</Text>}
           {pct !== null && <Text>{`  ·  ${bar(pct, 10)} ${pct}%`}</Text>}
           <Text>{`  ·  ${io(total)}`}</Text>
           {total.cacheRead > 0 && <Text dimColor>{`  ⚡ ${num(total.cacheRead)} kesh`}</Text>}
           {cur.endedAt !== null && <Text dimColor>  ✓ tugadi</Text>}
         </Text>
+      )
+
+    return (
+      <Box flexDirection="column" gap={1} width={e.props.bodyColumns}>
+        {buttons}
+        {metrics}
         {running.slice(0, 3).map(a => (
           <Text dimColor>
             ↳ {TIER_NAME[a.tier] ?? a.tier} · {a.effort}: {a.description}
@@ -523,7 +617,7 @@ export const register: Register = on => {
     const width = Math.max(5, Math.min(20, (e.props.bodyColumns ?? 40) - 24))
     const today = dayOf(await $.clock.now())
     // Cards: today, this week from Monday, this month; the week is compared with the same days of the last one.
-    const weekStart = shiftDay(today, -((new Date(today + 'T00:00:00Z').getUTCDay() + 6) % 7))
+    const weekStart = weekStartOf(today)
     const sumWhere = (keep: (day: string) => boolean) => rows.filter(r => keep(r.day)).reduce((s: Tok, r) => plus(s, r.tok), ZERO)
     const todayTok = sumWhere(d => d === today)
     const weekTok = sumWhere(d => d >= weekStart)
@@ -532,19 +626,7 @@ export const register: Register = on => {
     const change = prevWeek > 0 ? Math.round((100 * (sumOf(weekTok) - prevWeek)) / prevWeek) : null
 
     // The chart and the list: the chosen period, the three biggest environments in colour, the rest as one.
-    const from = shiftDay(today, -(statsDays - 1))
-    const inRange = rows.filter(r => r.day >= from)
-    const envs = totalsBy(inRange, r => r.cwd).sort((a, b) => sumOf(b[1]) - sumOf(a[1]))
-    const top = envs.slice(0, 3).map(([cwd]) => cwd)
-    const legend = envs.slice(0, 3).map(([cwd, t], i) => ({ name: folderName(cwd), color: ENV_COLORS[i] ?? OTHER_COLOR, tok: sumOf(t) }))
-    if (envs.length > 3) legend.push({ name: 'boshqalar', color: OTHER_COLOR, tok: envs.slice(3).reduce((s, [, t]) => s + sumOf(t), 0) })
-    const slotOf = (cwd: string) => (top.includes(cwd) ? top.indexOf(cwd) : top.length)
-    const days = Array.from({ length: statsDays }, (_, i) => shiftDay(from, i))
-    const perDay = days.map(d => {
-      const parts = legend.map(() => 0)
-      for (const r of inRange) if (r.day === d) parts[slotOf(r.cwd)] = (parts[slotOf(r.cwd)] ?? 0) + sumOf(r.tok)
-      return parts
-    })
+    const { from, days, perDay, legend } = dailyStack(rows, today, statsDays, 3)
     const periodTotal = Math.max(1, legend.reduce((s, l) => s + l.tok, 0))
     const maxDay = Math.max(1, ...perDay.map(p => p.reduce((a, b) => a + b, 0)))
 
