@@ -8,7 +8,7 @@ description: Autonomous plan mode - use when the user asks to execute a plan fil
 Reja — xotira: sessiya emas, fayl holatni saqlaydi. Reja fayli: loyiha papkasidagi PLAN.md (yoki foydalanuvchi ko'rsatgan boshqa fayl).
 
 ## Boshlash
-- Rejani yozgan sessiyada implementatsiyani boshlama. Reja tayyor bo'lgach, bir qatorda yoz: "Reja tayyor. /clear qiling va 'avtonom ishla' deb yozing."
+- Rejani yozgan sessiyada implementatsiyani boshlama. Reja tayyor bo'lgach, "Reja tayyor. /clear qiling, keyin quyidagini yuboring:" deb yoz va ostida alohida kod blokida tayyor prompt ber (reja faylining to'liq yo'li va "avtonom ishla" so'zlari bilan).
 - Bosqichlar belgilash katakchalari bilan yozilsin: "- [ ] 1.1 ...". Reja shunday bo'lmasa, birinchi ish sifatida uni shu formatga keltir (mazmunini o'zgartirmasdan) va tasdiq so'ra. Bu — ishni boshlashdan oldingi yagona savol.
 - "Avtonom ishla" deyilgandan keyin foydalanuvchi yo'q deb hisobla: bosqichlar va fazalar orasida to'xtama, davom etishni so'rama, /clear taklif qilma.
 - Ishni boshlaganda (yoki compact'dan keyin) PLAN.md ni o'qi, birinchi "[ ]" bosqichni top va undan davom et. Bajarilganlarni qayta qilma.

@@ -39,6 +39,9 @@ Javobni maqtov yoki rozilik bilan boshlama. Yondashuvda xato bo'lsa, birinchi ga
 2. Reja rejimi: foydalanuvchi reja faylini bajarishni so'raganda ("avtonom ishla", "PLAN.md ni implement qil", "rejani davom ettir"). "token-saver:reja-rejimi" skill'ini yukla va unga amal qil; oddiy rejimdagi vazifa chegarasi qoidalari qo'llanilmaydi.
 Kun boshi va oxiri ("xayrli tong", "bugunga yetadi") uchun "token-saver:kun-tartibi" skill'i bor.
 
+## Reja tuzilgandan keyin
+Reja tayyor bo'lgach, implementatsiyani boshlama. "Reja tayyor. /clear qiling, keyin quyidagini yuboring:" deb yoz va ostida alohida kod blokida (nusxa olish uchun) tayyor prompt ber: reja faylining to'liq yo'li va "avtonom ishla" so'zlari bilan. Prompt o'zicha tushunarli bo'lsin, foydalanuvchi uni o'zgartirmasdan yuborsin.
+
 ## Vazifa chegarasi (oddiy rejim)
 Foydalanuvchi vazifalarni bir-biriga ulab ketishi mumkin; chegarani kuzatish sening vazifang.
 - Bitta vazifa = bitta bag tuzatish YOKI bitta funksiya. Funksiya ustida chiqqan baglar shu vazifaga kiradi.
