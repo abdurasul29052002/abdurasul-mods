@@ -447,7 +447,10 @@ export const register: Register = on => {
     const sub: SubAgent = { id: e.tool_use_id, description: e.description, tier: model ?? 'default', effort: effort ?? 'default', isDone: false }
     await update($, agents, (list: SubAgent[]) => [...list, sub])
     await maybeOpenPane($)
-    const ran = await next({ ...e, ...(model ? { model } : {}), ...(effort ? { effort } : {}) })
+    // A typed router agent already gets its model and effort from its definition: pass the input unchanged,
+    // since a rewritten Agent input fails the auto-mode review that already approved the original.
+    const changed = !fixed && (model !== e.model || effort !== e.effort)
+    const ran = await next(changed ? { ...e, ...(model ? { model } : {}), ...(effort ? { effort } : {}) } : e)
     if (ran.deny !== undefined || ran.isError || e.run_in_background === false) {
       await update($, agents, (list: SubAgent[]) => list.map(a => (a.id === sub.id ? { ...a, isDone: true } : a)))
       await maybeEndRun($, isMainBusy)
